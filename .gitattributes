@@ -1,0 +1,34 @@
+.gitattributes text eol=lf
+
+# Normalize text files to LF in the repository
+* text=auto
+
+# Dart and Flutter configuration
+*.dart text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.lock text eol=lf
+*.metadata text eol=lf
+
+# Android build scripts and configuration
+*.gradle text eol=lf
+*.gradle.kts text eol=lf
+*.properties text eol=lf
+*.xml text eol=lf
+*.kt text eol=lf
+*.java text eol=lf
+*.sh text eol=lf
+
+# Windows batch scripts retain CRLF in the working tree
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files must not be modified
+*.jar binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+
+*.gradlew text eol=lf
