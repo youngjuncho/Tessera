@@ -1,121 +1,359 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import 'noise_engine.dart';
+
 void main() {
-  runApp(const MyApp());
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const SonoraApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class SonoraApp extends StatelessWidget {
+  const SonoraApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Sonora',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF668C83),
+          brightness: Brightness.dark,
+        ),
+        scaffoldBackgroundColor: const Color(0xFF101916),
+        useMaterial3: true,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const SonoraHomePage(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class SonoraHomePage extends StatefulWidget {
+  const SonoraHomePage({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<SonoraHomePage> createState() => _SonoraHomePageState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _SonoraHomePageState extends State<SonoraHomePage> {
+  final NoiseEngine _engine = NoiseEngine();
 
-  void _incrementCounter() {
+  NoiseType _selected = NoiseType.pink;
+  double _volume = 0.25;
+  bool _ready = false;
+  bool _playing = false;
+  bool _busy = true;
+  String? _error;
+
+  int _sleepMinutes = 0;
+  int _fadeMinutes = 5;
+
+  Timer? _sleepTimer;
+  Timer? _fadeStartTimer;
+  Timer? _fadeTimer;
+
+  DateTime? _fadeStartedAt;
+  Duration _fadeDuration = Duration.zero;
+  double _fadeFactor = 1.0;
+
+  @override
+  void initState() {
+    super.initState();
+    _initialize();
+  }
+
+  Future<void> _initialize() async {
+    try {
+      await _engine.initialize();
+      if (!mounted) return;
+      setState(() {
+        _ready = true;
+        _busy = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = '오디오 초기화 실패: $error';
+      });
+    }
+  }
+
+  Future<void> _playSelected() async {
+    if (!_ready || _busy) return;
+
+    final wasPlaying = _playing;
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _playing = true;
+      _busy = true;
+    });
+
+    if (!wasPlaying) {
+      _startSleepTimer();
+    }
+
+    try {
+      await _engine.play(_selected);
+      if (!mounted) return;
+      setState(() {
+        _playing = true;
+        _busy = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _playing = false;
+        _busy = false;
+        _error = '재생 실패: $error';
+      });
+    }
+  }
+
+  Future<void> _stop({bool force = false}) async {
+    if (_busy && !force) return;
+
+    _cancelSleepTimers();
+
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+
+    try {
+      await _engine.stop();
+      if (!mounted) return;
+
+      setState(() {
+        _playing = false;
+        _busy = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+
+      setState(() {
+        _busy = false;
+        _error = '정지 실패: $error';
+      });
+    }
+  }
+
+  void _cancelSleepTimers() {
+    _sleepTimer?.cancel();
+    _fadeStartTimer?.cancel();
+    _fadeTimer?.cancel();
+
+    _sleepTimer = null;
+    _fadeStartTimer = null;
+    _fadeTimer = null;
+    _fadeStartedAt = null;
+    _fadeDuration = Duration.zero;
+    _fadeFactor = 1.0;
+  }
+
+  void _startSleepTimer() {
+    _cancelSleepTimers();
+
+    if (_sleepMinutes <= 0) return;
+
+    final totalDuration = Duration(minutes: _sleepMinutes);
+    final requestedFade = Duration(minutes: _fadeMinutes);
+    final fadeDuration = _fadeMinutes <= 0
+        ? Duration.zero
+        : requestedFade <= totalDuration
+        ? requestedFade
+        : totalDuration;
+
+    _sleepTimer = Timer(totalDuration, () {
+      unawaited(_stop(force: true));
+    });
+
+    if (fadeDuration == Duration.zero) return;
+
+    final fadeDelay = totalDuration - fadeDuration;
+
+    _fadeStartTimer = Timer(fadeDelay, () {
+      _fadeStartedAt = DateTime.now();
+      _fadeDuration = fadeDuration;
+
+      _fadeTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
+        final startedAt = _fadeStartedAt;
+        if (startedAt == null) {
+          timer.cancel();
+          return;
+        }
+
+        final elapsed = DateTime.now().difference(startedAt);
+        final progress = elapsed.inMilliseconds / _fadeDuration.inMilliseconds;
+
+        _fadeFactor = (1.0 - progress).clamp(0.0, 1.0);
+        _engine.setVolume(_volume * _fadeFactor);
+
+        if (_fadeFactor <= 0) {
+          timer.cancel();
+        }
+      });
     });
   }
 
   @override
+  void dispose() {
+    _cancelSleepTimers();
+    unawaited(_engine.dispose());
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
-          children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
+      appBar: AppBar(title: const Text('Sonora'), centerTitle: true),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Spacer(),
+              const Icon(
+                Icons.graphic_eq_rounded,
+                size: 76,
+                color: Color(0xFF9BC8B8),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Find your quiet',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 28, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _playing ? '재생 중 · ${_selected.label}' : '원하는 소리를 선택하세요',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white.withValues(alpha: 0.7)),
+              ),
+              const SizedBox(height: 32),
+              for (final type in NoiseType.values)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: OutlinedButton(
+                    onPressed: _busy
+                        ? null
+                        : () {
+                            setState(() => _selected = type);
+                            if (_playing) {
+                              _playSelected();
+                            }
+                          },
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 18),
+                      backgroundColor: _selected == type
+                          ? const Color(0xFF29483F)
+                          : Colors.transparent,
+                      side: BorderSide(
+                        color: _selected == type
+                            ? const Color(0xFF9BC8B8)
+                            : Colors.white24,
+                      ),
+                    ),
+                    child: Text(type.label),
+                  ),
+                ),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  const Icon(Icons.volume_down_rounded),
+                  Expanded(
+                    child: Slider(
+                      value: _volume,
+                      min: 0,
+                      max: 1,
+                      onChanged: (value) {
+                        setState(() => _volume = value);
+                        _engine.setVolume(value * _fadeFactor);
+                      },
+                    ),
+                  ),
+                  SizedBox(
+                    width: 44,
+                    child: Text(
+                      '${(_volume * 100).round()}%',
+                      textAlign: TextAlign.end,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  const Expanded(child: Text('수면 타이머')),
+                  DropdownButton<int>(
+                    value: _sleepMinutes,
+                    items: const [
+                      DropdownMenuItem(value: 0, child: Text('끔')),
+                      DropdownMenuItem(value: 1, child: Text('1분 (테스트)')),
+                      DropdownMenuItem(value: 30, child: Text('30분')),
+                      DropdownMenuItem(value: 60, child: Text('1시간')),
+                      DropdownMenuItem(value: 120, child: Text('2시간')),
+                      DropdownMenuItem(value: 240, child: Text('4시간')),
+                    ],
+                    onChanged: _busy
+                        ? null
+                        : (value) {
+                            if (value == null) return;
+                            setState(() => _sleepMinutes = value);
+                            if (_playing) _startSleepTimer();
+                          },
+                  ),
+                ],
+              ),
+              Row(
+                children: [
+                  const Expanded(child: Text('페이드아웃')),
+                  DropdownButton<int>(
+                    value: _fadeMinutes,
+                    items: const [
+                      DropdownMenuItem(value: 0, child: Text('끔')),
+                      DropdownMenuItem(value: 1, child: Text('1분')),
+                      DropdownMenuItem(value: 5, child: Text('5분')),
+                      DropdownMenuItem(value: 10, child: Text('10분')),
+                    ],
+                    onChanged: _busy
+                        ? null
+                        : (value) {
+                            if (value == null) return;
+                            setState(() => _fadeMinutes = value);
+                            if (_playing) _startSleepTimer();
+                          },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: !_ready || _busy
+                    ? null
+                    : (_playing ? _stop : _playSelected),
+                icon: Icon(
+                  _playing ? Icons.stop_rounded : Icons.play_arrow_rounded,
+                ),
+                label: Text(_busy ? '준비 중...' : (_playing ? '정지' : '재생')),
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 18),
+                ),
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 16),
+                Text(_error!, style: const TextStyle(color: Colors.redAccent)),
+              ],
+              const Spacer(),
+              const Text(
+                'Sleep · Focus · Relax',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white54),
+              ),
+            ],
+          ),
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
       ),
     );
   }
